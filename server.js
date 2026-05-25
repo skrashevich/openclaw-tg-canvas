@@ -195,9 +195,11 @@ function verifyTelegramInitData(initData) {
 
   const replayKey = `${user.id}:${authDate}:${hash}`;
   if (isInitDataReplayed(replayKey)) {
-    return { ok: false, error: "initData replayed" };
+    // Allow replay for the same user — Telegram WebView reuses initData on restart
+    // Still reject if the initData itself is expired (checked above)
+  } else {
+    markInitDataUsed(replayKey, INIT_DATA_MAX_AGE_SECONDS);
   }
-  markInitDataUsed(replayKey, INIT_DATA_MAX_AGE_SECONDS);
 
   return { ok: true, user };
 }
