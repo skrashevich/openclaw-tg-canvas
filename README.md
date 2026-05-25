@@ -2,7 +2,10 @@
 
 [![ClawHub](https://img.shields.io/badge/ClawHub-openclaw--tg--canvas-blue)](https://clawhub.ai/skills/openclaw-tg-canvas)
 
-<img src="screenshot.jpg" width="300" alt="Mini App screenshot" align="right" />
+<p align="center">
+  <img src="screenshot.jpg" width="250" alt="Sessions UI" />
+  <img src="screenshot2.jpg" width="250" alt="Chat view" />
+</p>
 
 This skill provides a Telegram Mini App with four capabilities:
 
