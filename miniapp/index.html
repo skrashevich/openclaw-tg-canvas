@@ -6,6 +6,12 @@
     <title>OpenClaw Canvas</title>
     <!-- Telegram WebApp SDK -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/miniapp/style.css" />
     <!-- xterm.js (loaded lazily by app.js when terminal mode is activated) -->
     <link id="xtermCss" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
@@ -14,7 +20,10 @@
     <div id="app" class="app">
       <header class="topbar">
         <div class="title-wrap">
-          <div class="title">OpenClaw Canvas</div>
+          <div class="brand-row">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <div class="title">OpenClaw Canvas</div>
+          </div>
           <div id="lastUpdated" class="subtitle">Last updated —</div>
         </div>
         <div class="status" role="status" aria-live="polite">
@@ -22,9 +31,9 @@
           <span id="connText" class="conn-text">Connecting…</span>
         </div>
         <div class="topbar-actions">
-          <button id="openSessionsBtn" class="button" style="padding:6px 10px;">Sessions</button>
-          <button id="openTerminalBtn" class="button" style="padding:6px 10px;">Terminal</button>
-          <button id="openControlBtn" class="button" style="padding:6px 10px;">Control</button>
+          <button id="openSessionsBtn" class="button topbar-btn" type="button">Sessions</button>
+          <button id="openTerminalBtn" class="button topbar-btn" type="button">Terminal</button>
+          <button id="openControlBtn" class="button topbar-btn topbar-btn--primary" type="button">Control</button>
         </div>
       </header>
 
