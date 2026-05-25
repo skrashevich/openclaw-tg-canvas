@@ -3,6 +3,11 @@
 
 (() => {
   const tg = window.Telegram?.WebApp;
+  const i18n = window.OcI18n;
+  const t = i18n.t.bind(i18n);
+  const formatRelative = i18n.formatRelative.bind(i18n);
+  const formatMessageTime = i18n.formatMessageTime.bind(i18n);
+
   // Apply Telegram theme (light/dark)
   try {
     const theme = tg?.colorScheme || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -16,6 +21,9 @@
   const openControlBtn = document.getElementById('openControlBtn');
   const openTerminalBtn = document.getElementById('openTerminalBtn');
   const closeTerminalBtn = document.getElementById('closeTerminalBtn');
+  const langToggleBtn = document.getElementById('langToggleBtn');
+  const appTitleEl = document.querySelector('.title');
+  const terminalTitleEl = document.querySelector('.terminal-topbar-title');
   let openingControl = false;
 
   let jwt = null;
@@ -23,18 +31,86 @@
   let reconnectTimer = null;
   let lastUpdatedTs = null;
   let relativeTimer = null;
+  let lastConnState = 'connecting';
+  let currentCanvasPayload = null;
+  let mainView = 'connecting'; // connecting | denied | welcome | canvas | center
+  let centerView = null; // { messageKey, messageVars, withSpinner, buttonKey, buttonHandler, useCard }
+
+  const openSessionsBtn = document.getElementById('openSessionsBtn');
+  const sessionsPane = document.getElementById('sessions-pane');
+  const sessionsBackBtn = document.getElementById('sessionsBackBtn');
+  const sessionsHeaderTitle = document.getElementById('sessionsHeaderTitle');
+  const sessionsRefreshBtn = document.getElementById('sessionsRefreshBtn');
+  const sessionsListView = document.getElementById('sessions-list-view');
+  const sessionsChatView = document.getElementById('sessions-chat-view');
+  const sessionsListEl = document.getElementById('sessionsList');
+  const sessionsListScroll = document.getElementById('sessionsListScroll');
+  const sessionsPullHint = document.getElementById('sessionsPullHint');
+  const sessionsMessagesEl = document.getElementById('sessionsMessages');
+  const sessionsComposer = document.getElementById('sessionsComposer');
+  const sessionsInput = document.getElementById('sessionsInput');
+  const sessionsSendBtn = document.getElementById('sessionsSendBtn');
 
   // ---------- UI Helpers ----------
+  function updateStaticChrome() {
+    if (appTitleEl) appTitleEl.textContent = t('appTitle');
+    if (openSessionsBtn) openSessionsBtn.textContent = t('btnSessions');
+    if (openTerminalBtn) openTerminalBtn.textContent = t('btnTerminal');
+    if (openControlBtn && !openingControl) openControlBtn.textContent = t('btnControl');
+    if (langToggleBtn) {
+      langToggleBtn.textContent = t('langToggle');
+      langToggleBtn.setAttribute('aria-label', t('langToggleAria'));
+    }
+    if (terminalTitleEl) terminalTitleEl.textContent = t('terminalTitle');
+    if (closeTerminalBtn) closeTerminalBtn.setAttribute('aria-label', t('terminalCloseAria'));
+    if (sessionsInput) sessionsInput.placeholder = t('messagePlaceholder');
+    if (sessionsSendBtn && !chatSending) sessionsSendBtn.textContent = t('btnSend');
+    if (sessionsPane) sessionsPane.setAttribute('aria-label', t('sessionsTitle'));
+    if (sessionsBackBtn) {
+      const isList = sessionsView === 'list';
+      sessionsBackBtn.setAttribute('aria-label', isList ? t('sessionsBackCloseAria') : t('sessionsBackAria'));
+    }
+    if (sessionsRefreshBtn) sessionsRefreshBtn.setAttribute('aria-label', t('sessionsRefreshAria'));
+    if (sessionsPullHint && pullDistance <= 50) {
+      sessionsPullHint.textContent = pullDistance > 50 ? t('releaseToRefresh') : t('pullDownRefresh');
+    } else if (sessionsPullHint) {
+      sessionsPullHint.textContent = t('pullDownRefresh');
+    }
+    if (lastUpdatedTs) updateLastUpdated(lastUpdatedTs);
+    else if (lastUpdatedEl) lastUpdatedEl.textContent = t('lastUpdatedEmpty');
+  }
+
+  function refreshAllUi() {
+    updateStaticChrome();
+    setStatus(lastConnState);
+    if (mainView === 'welcome') showWelcome();
+    else if (mainView === 'canvas' && currentCanvasPayload) renderPayload(currentCanvasPayload);
+    else if (mainView === 'center' && centerView) {
+      showCenter(centerView.messageKey, centerView.messageVars, centerView.withSpinner, centerView.buttonKey, centerView.buttonHandler, centerView.useCard);
+    } else if (mainView === 'connecting') showCenter('connecting', null, true, null, null, false);
+    else if (mainView === 'denied') showCenter('accessDenied', null, false, 'btnClose', () => tg?.close?.(), true);
+
+    if (sessionsPane?.classList.contains('is-open')) {
+      setSessionsViewMode(sessionsView);
+      if (sessionsView === 'list') renderSessionsList();
+      else {
+        updateSendButtonState();
+        renderChatMessages();
+      }
+    }
+  }
+
   function setStatus(state) {
+    lastConnState = state;
     connDot.classList.remove('connected', 'connecting');
     if (state === 'connected') {
       connDot.classList.add('connected');
-      connText.textContent = 'Connected';
+      connText.textContent = t('statusConnected');
     } else if (state === 'connecting' || state === 'reconnecting') {
       connDot.classList.add('connecting');
-      connText.textContent = state === 'reconnecting' ? 'Reconnecting…' : 'Connecting…';
+      connText.textContent = state === 'reconnecting' ? t('statusReconnecting') : t('statusConnecting');
     } else {
-      connText.textContent = 'Offline';
+      connText.textContent = t('statusOffline');
     }
   }
 
@@ -42,19 +118,21 @@
     if (!openControlBtn) return;
     if (isLoading) {
       openControlBtn.disabled = true;
-      openControlBtn.dataset.prevText = openControlBtn.textContent || 'Control';
-      openControlBtn.textContent = 'Opening…';
+      openControlBtn.textContent = t('btnOpening');
       openControlBtn.style.opacity = '0.75';
       openControlBtn.style.cursor = 'wait';
     } else {
       openControlBtn.disabled = false;
-      openControlBtn.textContent = openControlBtn.dataset.prevText || 'Control';
+      openControlBtn.textContent = t('btnControl');
       openControlBtn.style.opacity = '';
       openControlBtn.style.cursor = '';
     }
   }
 
-  function showCenter(message, withSpinner = false, buttonText = null, buttonHandler = null, useCard = true) {
+  function showCenter(messageKey, messageVars = null, withSpinner = false, buttonKey = null, buttonHandler = null, useCard = true) {
+    mainView = 'center';
+    centerView = { messageKey, messageVars, withSpinner, buttonKey, buttonHandler, useCard };
+    currentCanvasPayload = null;
     contentEl.innerHTML = '';
     const wrap = document.createElement('div');
     wrap.className = 'center fade-in';
@@ -74,13 +152,13 @@
     }
 
     const text = document.createElement('div');
-    text.textContent = message;
+    text.textContent = t(messageKey, messageVars);
     holder.appendChild(text);
 
-    if (buttonText && buttonHandler) {
+    if (buttonKey && buttonHandler) {
       const btn = document.createElement('button');
       btn.className = 'button';
-      btn.textContent = buttonText;
+      btn.textContent = t(buttonKey);
       btn.addEventListener('click', buttonHandler);
       holder.appendChild(btn);
     }
@@ -89,6 +167,9 @@
   }
 
   function showWelcome() {
+    mainView = 'welcome';
+    centerView = null;
+    currentCanvasPayload = null;
     contentEl.innerHTML = '';
     const wrap = document.createElement('div');
     wrap.className = 'center fade-in';
@@ -97,11 +178,11 @@
 
     const title = document.createElement('div');
     title.className = 'welcome-title';
-    title.textContent = 'OpenClaw Canvas';
+    title.textContent = t('welcomeTitle');
 
     const lead = document.createElement('div');
     lead.className = 'welcome-lead';
-    lead.textContent = 'Your agent dashboard in Telegram. Canvas content from OpenClaw appears here when pushed.';
+    lead.textContent = t('welcomeLead');
 
     const actions = document.createElement('div');
     actions.className = 'welcome-actions';
@@ -109,13 +190,13 @@
     const sessionsBtn = document.createElement('button');
     sessionsBtn.type = 'button';
     sessionsBtn.className = 'button';
-    sessionsBtn.textContent = 'Open Sessions';
+    sessionsBtn.textContent = t('welcomeOpenSessions');
     sessionsBtn.addEventListener('click', () => openSessions());
 
     const terminalBtn = document.createElement('button');
     terminalBtn.type = 'button';
     terminalBtn.className = 'button';
-    terminalBtn.textContent = 'Open Terminal';
+    terminalBtn.textContent = t('welcomeOpenTerminal');
     terminalBtn.addEventListener('click', () => {
       document.getElementById('terminal-pane').style.display = 'flex';
       connectTerminal();
@@ -126,7 +207,7 @@
 
     const hint = document.createElement('div');
     hint.className = 'welcome-hint';
-    hint.textContent = 'Tip: use Sessions to read and reply to OpenClaw chats. Canvas updates arrive live when your agent pushes content.';
+    hint.textContent = t('welcomeHint');
 
     card.appendChild(title);
     card.appendChild(lead);
@@ -145,26 +226,12 @@
     return Boolean(content);
   }
 
-  function formatRelative(ts) {
-    if (!ts) return '—';
-    const delta = Math.max(0, Date.now() - ts);
-    const sec = Math.floor(delta / 1000);
-    if (sec < 5) return 'just now';
-    if (sec < 60) return `${sec}s ago`;
-    const min = Math.floor(sec / 60);
-    if (min < 60) return `${min}m ago`;
-    const hr = Math.floor(min / 60);
-    if (hr < 24) return `${hr}h ago`;
-    const days = Math.floor(hr / 24);
-    return `${days}d ago`;
-  }
-
   function updateLastUpdated(ts) {
     lastUpdatedTs = ts || Date.now();
-    lastUpdatedEl.textContent = `Last updated ${formatRelative(lastUpdatedTs)}`;
+    lastUpdatedEl.textContent = t('lastUpdated', { time: formatRelative(lastUpdatedTs) });
     clearInterval(relativeTimer);
     relativeTimer = setInterval(() => {
-      lastUpdatedEl.textContent = `Last updated ${formatRelative(lastUpdatedTs)}`;
+      lastUpdatedEl.textContent = t('lastUpdated', { time: formatRelative(lastUpdatedTs) });
     }, 30000);
   }
 
@@ -322,7 +389,7 @@
       await loadScript('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js');
       await loadScript('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js');
     } catch (e) {
-      containerEl.innerHTML = '<div style="color:#ff7b72;padding:16px">Failed to load terminal library.</div>';
+      containerEl.innerHTML = `<div style="color:#ff7b72;padding:16px">${escapeHtml(t('terminalLoadFailed'))}</div>`;
       return;
     }
 
@@ -396,13 +463,13 @@
         const msg = JSON.parse(event.data);
         if (msg.type === 'data') term.write(msg.data);
         else if (msg.type === 'exit') {
-          term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
+          term.writeln(`\r\n\x1b[33m${t('terminalProcessExited', { code: msg.code })}\x1b[0m`);
         }
       } catch (_) {}
     };
 
     tws.onclose = () => {
-      if (termInstance) termInstance.writeln('\r\n\x1b[31m[Connection closed]\x1b[0m');
+      if (termInstance) termInstance.writeln(`\r\n\x1b[31m${t('terminalConnClosed')}\x1b[0m`);
     };
 
     // Keyboard input → WS (apply sticky modifiers)
@@ -477,6 +544,9 @@
       return;
     }
 
+    mainView = 'canvas';
+    centerView = null;
+    currentCanvasPayload = payload;
     const { format, content } = payload;
     contentEl.innerHTML = '';
 
@@ -543,7 +613,7 @@
           openingControl = true;
           setControlButtonLoading(true);
           setStatus('connecting');
-          connText.textContent = 'Opening control…';
+          connText.textContent = t('statusOpeningControl');
 
           // Open control inline in the same Mini App WebView.
           setTimeout(() => {
@@ -622,21 +692,6 @@
   }
 
   // ---------- Sessions ----------
-  const openSessionsBtn = document.getElementById('openSessionsBtn');
-  const sessionsPane = document.getElementById('sessions-pane');
-  const sessionsBackBtn = document.getElementById('sessionsBackBtn');
-  const sessionsHeaderTitle = document.getElementById('sessionsHeaderTitle');
-  const sessionsRefreshBtn = document.getElementById('sessionsRefreshBtn');
-  const sessionsListView = document.getElementById('sessions-list-view');
-  const sessionsChatView = document.getElementById('sessions-chat-view');
-  const sessionsListEl = document.getElementById('sessionsList');
-  const sessionsListScroll = document.getElementById('sessionsListScroll');
-  const sessionsPullHint = document.getElementById('sessionsPullHint');
-  const sessionsMessagesEl = document.getElementById('sessionsMessages');
-  const sessionsComposer = document.getElementById('sessionsComposer');
-  const sessionsInput = document.getElementById('sessionsInput');
-  const sessionsSendBtn = document.getElementById('sessionsSendBtn');
-
   let sessionsView = 'list';
   let sessionsList = [];
   let activeSessionKey = null;
@@ -658,7 +713,7 @@
   function updateSendButtonState() {
     if (!sessionsSendBtn) return;
     sessionsSendBtn.disabled = chatSending;
-    sessionsSendBtn.textContent = chatSending ? '…' : 'Send';
+    sessionsSendBtn.textContent = chatSending ? '…' : t('btnSend');
   }
 
   function scrollMessagesToBottom(force = false) {
@@ -705,7 +760,7 @@
       if (!pullStartY || sessionsListScroll.scrollTop > 0) return;
       pullDistance = Math.max(0, e.touches[0].clientY - pullStartY);
       if (pullDistance > 8) {
-        sessionsPullHint.textContent = pullDistance > 50 ? 'Release to refresh' : 'Pull down to refresh';
+        sessionsPullHint.textContent = pullDistance > 50 ? t('releaseToRefresh') : t('pullDownRefresh');
         sessionsPullHint.classList.toggle('is-active', pullDistance > 50);
       }
     }, { passive: true });
@@ -714,7 +769,7 @@
       if (pullDistance > 50) fetchSessionsList(false);
       pullStartY = 0;
       pullDistance = 0;
-      sessionsPullHint.textContent = 'Pull down to refresh';
+      sessionsPullHint.textContent = t('pullDownRefresh');
       sessionsPullHint.classList.remove('is-active');
     });
 
@@ -745,17 +800,19 @@
     sessionsListView.hidden = !isList;
     sessionsChatView.hidden = isList;
     sessionsRefreshBtn.hidden = !isList;
-    sessionsBackBtn.textContent = isList ? '✕' : '← Back';
+    sessionsBackBtn.textContent = isList ? '✕' : t('btnBack');
+    sessionsBackBtn.setAttribute('aria-label', isList ? t('sessionsBackCloseAria') : t('sessionsBackAria'));
+    sessionsRefreshBtn.setAttribute('aria-label', t('sessionsRefreshAria'));
     if (isList) {
-      sessionsHeaderTitle.textContent = 'Sessions';
+      sessionsHeaderTitle.textContent = t('sessionsTitle');
     } else {
       const session = sessionsList.find((s) => s.key === activeSessionKey);
-      sessionsHeaderTitle.textContent = session ? sessionTitle(session) : 'Chat';
+      sessionsHeaderTitle.textContent = session ? sessionTitle(session) : t('chatTitle');
     }
   }
 
   function sessionTitle(session) {
-    return session.derivedTitle || session.displayName || session.label || session.key || 'Session';
+    return session.derivedTitle || session.displayName || session.label || session.key || t('sessionDefault');
   }
 
   function extractMessageText(msg) {
@@ -777,12 +834,6 @@
     if (role === 'user' || role === 'human') return 'user';
     if (role === 'assistant' || role === 'model') return 'assistant';
     return 'assistant';
-  }
-
-  function formatMessageTime(ts) {
-    if (!ts || !Number.isFinite(ts)) return '';
-    const d = new Date(ts);
-    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
   function authHeaders() {
@@ -926,7 +977,7 @@
     } finally {
       sessionsLoading = false;
       sessionsRefreshBtn.disabled = false;
-      sessionsRefreshBtn.textContent = '↻';
+      sessionsRefreshBtn.textContent = t('btnRefresh');
       renderSessionsList();
     }
   }
@@ -938,7 +989,7 @@
     if (sessionsLoading && sessionsList.length === 0) {
       const loading = document.createElement('li');
       loading.className = 'sessions-empty';
-      loading.textContent = 'Loading sessions…';
+      loading.textContent = t('loadingSessions');
       sessionsListEl.appendChild(loading);
       return;
     }
@@ -946,7 +997,7 @@
     if (sessionsList.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'sessions-empty';
-      empty.textContent = 'No sessions found.';
+      empty.textContent = t('noSessions');
       sessionsListEl.appendChild(empty);
       return;
     }
@@ -957,10 +1008,10 @@
       btn.type = 'button';
       btn.className = 'session-item' + (session.key === activeSessionKey ? ' active' : '');
 
-      const t = document.createElement('div');
-      t.className = 'session-item-title';
-      t.textContent = sessionTitle(session);
-      btn.appendChild(t);
+      const titleEl = document.createElement('div');
+      titleEl.className = 'session-item-title';
+      titleEl.textContent = sessionTitle(session);
+      btn.appendChild(titleEl);
 
       if (session.lastMessagePreview) {
         const p = document.createElement('div');
@@ -1003,7 +1054,7 @@
         timestamp: typeof m.timestamp === 'number' ? m.timestamp : undefined,
       })).filter((m) => m.text.trim());
     } catch (_) {
-      chatMessages = [{ id: 'err', role: 'assistant', text: 'Failed to load history.', timestamp: Date.now() }];
+      chatMessages = [{ id: 'err', role: 'assistant', text: t('failedLoadHistory'), timestamp: Date.now() }];
     }
 
     renderChatMessages(true);
@@ -1060,7 +1111,7 @@
     if (chatMessages.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'sessions-empty';
-      empty.textContent = 'No messages yet. Say hello!';
+      empty.textContent = t('noMessages');
       sessionsMessagesEl.appendChild(empty);
       return;
     }
@@ -1099,13 +1150,19 @@
 
   // ---------- Boot ----------
   async function boot() {
+    updateStaticChrome();
+    i18n.onLangChange(() => refreshAllUi());
+    langToggleBtn?.addEventListener('click', () => i18n.toggleLang());
+
+    mainView = 'connecting';
     setStatus('connecting');
-    showCenter('Connecting…', true, null, null, false);
+    showCenter('connecting', null, true, null, null, false);
 
     const authed = await authenticate();
     if (!authed) {
+      mainView = 'denied';
       setStatus('disconnected');
-      showCenter('Access denied', false, 'Close', () => tg?.close?.());
+      showCenter('accessDenied', null, false, 'btnClose', () => tg?.close?.(), true);
       return;
     }
 

@@ -424,6 +424,22 @@ body::after {
 .button:disabled {
   opacity: 0.65;
   cursor: wait;
+.topbar-actions .button,
+.topbar-btn {
+  font-size: 12px;
+  padding: 8px 10px;
+  min-height: 36px;
+  white-space: nowrap;
+>>>>>>> 501f5a9 (feat: i18n — English + Russian)
+}
+
+.lang-toggle-btn {
+  min-width: 40px;
+  padding: 8px 10px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  font-weight: 700;
+  letter-spacing: 0.03em;
 }
 
 @media (max-width: 420px) {
