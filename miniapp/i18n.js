@@ -216,7 +216,6 @@
   document.documentElement.lang = currentLang;
 
   window.OcI18n = {
-    LANG,
     t,
     getLang,
     setLang,

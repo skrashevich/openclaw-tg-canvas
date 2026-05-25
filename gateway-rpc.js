@@ -244,7 +244,7 @@ function createGatewayRpcPool(host, port, token) {
     return new GatewayRpcClient(host, port, token);
   }
 
-  return { request, getClient, createDedicatedClient };
+  return { request, createDedicatedClient };
 }
 
 function parseSessionsApiPath(pathname) {
@@ -259,7 +259,6 @@ function parseSessionsApiPath(pathname) {
 }
 
 module.exports = {
-  GatewayRpcClient,
   createGatewayRpcPool,
   parseSessionsApiPath,
 };

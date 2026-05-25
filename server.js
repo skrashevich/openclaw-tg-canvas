@@ -109,10 +109,7 @@ function signJwt(payload) {
   const headerB64 = base64url(JSON.stringify(header));
   const payloadB64 = base64url(JSON.stringify(payload));
   const data = `${headerB64}.${payloadB64}`;
-  const sig = crypto.createHmac("sha256", JWT_SECRET).update(data).digest("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+  const sig = base64url(crypto.createHmac("sha256", JWT_SECRET).update(data).digest());
   return `${data}.${sig}`;
 }
 
@@ -122,10 +119,7 @@ function verifyJwt(token) {
     if (parts.length !== 3) return null;
     const [headerB64, payloadB64, sig] = parts;
     const data = `${headerB64}.${payloadB64}`;
-    const expectedSig = crypto.createHmac("sha256", JWT_SECRET).update(data).digest("base64")
-      .replace(/=/g, "")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_");
+    const expectedSig = base64url(crypto.createHmac("sha256", JWT_SECRET).update(data).digest());
     if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return null;
     const payloadJson = Buffer.from(payloadB64.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString();
     const payload = JSON.parse(payloadJson);
@@ -326,8 +320,61 @@ function proxyToOpenClaw(req, res, targetPath) {
 const { createGatewayRpcPool, parseSessionsApiPath } = require("./gateway-rpc");
 const gatewayRpc = createGatewayRpcPool(OPENCLAW_PROXY_HOST, OPENCLAW_PROXY_PORT, OPENCLAW_GATEWAY_TOKEN);
 
-async function gatewayRpcRequest(method, params, opts) {
-  return gatewayRpc.request(method, params, opts);
+function getPushTokenFromRequest(req, urlObj) {
+  const headerToken = req.headers["x-push-token"] || "";
+  const auth = req.headers["authorization"] || "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const queryToken = urlObj.searchParams.get("token") || "";
+  return headerToken || bearer || queryToken;
+}
+
+function authorizePushRequest(req, res, urlObj) {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    sendJson(res, 403, { error: "Forbidden" });
+    return false;
+  }
+  const provided = getPushTokenFromRequest(req, urlObj);
+  if (!provided || provided !== PUSH_TOKEN) {
+    sendJson(res, 401, { error: "Invalid push token" });
+    return false;
+  }
+  return true;
+}
+
+function proxyOpenClawWsUpgrade(req, socket, head, targetPath, logLabel) {
+  const wsHeaders = { ...req.headers };
+  if (OPENCLAW_GATEWAY_TOKEN) wsHeaders.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
+  const proxyReq = http.request({
+    host: OPENCLAW_PROXY_HOST,
+    port: OPENCLAW_PROXY_PORT,
+    method: "GET",
+    path: targetPath,
+    headers: wsHeaders,
+  });
+
+  proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+    socket.write("HTTP/1.1 101 Switching Protocols\r\n");
+    for (const [k, v] of Object.entries(proxyRes.headers)) {
+      socket.write(`${k}: ${v}\r\n`);
+    }
+    socket.write("\r\n");
+    if (proxyHead && proxyHead.length) socket.write(proxyHead);
+    if (head && head.length) proxySocket.write(head);
+    proxySocket.pipe(socket).pipe(proxySocket);
+  });
+
+  proxyReq.on("response", (r) => {
+    socket.write(`HTTP/1.1 ${r.statusCode || 502} Upstream Rejected\r\nConnection: close\r\n\r\n`);
+    socket.destroy();
+  });
+
+  proxyReq.on("error", (err) => {
+    console.error(`[tg-canvas] ws ${logLabel} proxy error:`, err.message);
+    socket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+    socket.destroy();
+  });
+
+  proxyReq.end();
 }
 
 function requireJwtForApi(req, urlObj) {
@@ -507,17 +554,7 @@ const server = http.createServer(async (req, res) => {
     // Push endpoint — PUSH_TOKEN required (loopback check retained as an additional layer
     // but is NOT sufficient alone when cloudflared is in use; see startup validation above)
     if (req.method === "POST" && url.pathname === "/push") {
-      if (!isLoopbackAddress(req.socket.remoteAddress)) {
-        return sendJson(res, 403, { error: "Forbidden" });
-      }
-      const headerToken = req.headers["x-push-token"] || "";
-      const auth = req.headers["authorization"] || "";
-      const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-      const queryToken = url.searchParams.get("token") || "";
-      const provided = headerToken || bearer || queryToken;
-      if (!provided || provided !== PUSH_TOKEN) {
-        return sendJson(res, 401, { error: "Invalid push token" });
-      }
+      if (!authorizePushRequest(req, res, url)) return;
 
       const ip = req.socket.remoteAddress || 'unknown';
       if (!rateLimit(`auth:${ip}`, RATE_LIMIT_AUTH_PER_MIN, 60_000)) {
@@ -556,17 +593,7 @@ const server = http.createServer(async (req, res) => {
 
     // Clear endpoint — PUSH_TOKEN required (same rationale as /push)
     if (req.method === "POST" && url.pathname === "/clear") {
-      if (!isLoopbackAddress(req.socket.remoteAddress)) {
-        return sendJson(res, 403, { error: "Forbidden" });
-      }
-      const headerToken = req.headers["x-push-token"] || "";
-      const auth = req.headers["authorization"] || "";
-      const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-      const queryToken = url.searchParams.get("token") || "";
-      const provided = headerToken || bearer || queryToken;
-      if (!provided || provided !== PUSH_TOKEN) {
-        return sendJson(res, 401, { error: "Invalid push token" });
-      }
+      if (!authorizePushRequest(req, res, url)) return;
       currentState = null;
       broadcast({ type: "clear" });
       return sendJson(res, 200, { ok: true });
@@ -585,7 +612,7 @@ const server = http.createServer(async (req, res) => {
       try {
         if (sessionsRoute.kind === "list" && req.method === "GET") {
           const limit = parseInt(url.searchParams.get("limit") || "50", 10);
-          const result = await gatewayRpcRequest("sessions.list", {
+          const result = await gatewayRpc.request("sessions.list", {
             limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 200) : 50,
             includeLastMessage: true,
             includeDerivedTitles: true,
@@ -595,7 +622,7 @@ const server = http.createServer(async (req, res) => {
 
         if (sessionsRoute.kind === "history" && req.method === "GET") {
           const limit = parseInt(url.searchParams.get("limit") || "100", 10);
-          const result = await gatewayRpcRequest("chat.history", {
+          const result = await gatewayRpc.request("chat.history", {
             sessionKey: sessionsRoute.key,
             limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 500) : 100,
           });
@@ -607,7 +634,7 @@ const server = http.createServer(async (req, res) => {
           const message = typeof body.message === "string" ? body.message.trim() : "";
           if (!message) return sendJson(res, 400, { error: "Missing message" });
           const runId = crypto.randomUUID();
-          const result = await gatewayRpcRequest("chat.send", {
+          const result = await gatewayRpc.request("chat.send", {
             sessionKey: sessionsRoute.key,
             message,
             idempotencyKey: runId,
@@ -833,43 +860,7 @@ server.on("upgrade", (req, socket, head) => {
     }
 
     const targetPath = url.pathname.replace(/^\/oc/, "") + (url.search || "");
-    const wsHeaders = { ...req.headers };
-    if (OPENCLAW_GATEWAY_TOKEN) wsHeaders.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
-    const proxyReq = http.request({
-      host: OPENCLAW_PROXY_HOST,
-      port: OPENCLAW_PROXY_PORT,
-      method: "GET",
-      path: targetPath,
-      headers: wsHeaders,
-    });
-
-    proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
-      // forward 101 response
-      socket.write("HTTP/1.1 101 Switching Protocols\r\n");
-      for (const [k, v] of Object.entries(proxyRes.headers)) {
-        socket.write(`${k}: ${v}\r\n`);
-      }
-      socket.write("\r\n");
-
-      if (proxyHead && proxyHead.length) socket.write(proxyHead);
-      if (head && head.length) proxySocket.write(head);
-
-      proxySocket.pipe(socket).pipe(proxySocket);
-    });
-
-    proxyReq.on("response", (r) => {
-      // Upstream rejected WS upgrade (e.g., 401). Return a concrete status instead of generic 502.
-      socket.write(`HTTP/1.1 ${r.statusCode || 502} Upstream Rejected\r\nConnection: close\r\n\r\n`);
-      socket.destroy();
-    });
-
-    proxyReq.on("error", (err) => {
-      console.error('[tg-canvas] ws /oc proxy error:', err.message);
-      socket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-      socket.destroy();
-    });
-
-    proxyReq.end();
+    proxyOpenClawWsUpgrade(req, socket, head, targetPath, "/oc");
     return;
   }
 
@@ -885,36 +876,7 @@ server.on("upgrade", (req, socket, head) => {
       return;
     }
 
-    const wsHeaders = { ...req.headers };
-    if (OPENCLAW_GATEWAY_TOKEN) wsHeaders.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
-    const proxyReq = http.request({
-      host: OPENCLAW_PROXY_HOST,
-      port: OPENCLAW_PROXY_PORT,
-      method: "GET",
-      path: url.pathname + (url.search || ''),
-      headers: wsHeaders,
-    });
-
-    proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
-      socket.write("HTTP/1.1 101 Switching Protocols\r\n");
-      for (const [k, v] of Object.entries(proxyRes.headers)) socket.write(`${k}: ${v}\r\n`);
-      socket.write("\r\n");
-      if (proxyHead && proxyHead.length) socket.write(proxyHead);
-      if (head && head.length) proxySocket.write(head);
-      proxySocket.pipe(socket).pipe(proxySocket);
-    });
-
-    proxyReq.on('response', (r) => {
-      socket.write(`HTTP/1.1 ${r.statusCode || 502} Upstream Rejected\r\nConnection: close\r\n\r\n`);
-      socket.destroy();
-    });
-
-    proxyReq.on('error', (err) => {
-      console.error('[tg-canvas] ws root proxy error:', err.message);
-      socket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-      socket.destroy();
-    });
-    proxyReq.end();
+    proxyOpenClawWsUpgrade(req, socket, head, url.pathname + (url.search || ""), "root");
     return;
   }
 

@@ -8,6 +8,15 @@
   const formatRelative = i18n.formatRelative.bind(i18n);
   const formatMessageTime = i18n.formatMessageTime.bind(i18n);
 
+  function wsProto() {
+    return location.protocol === 'https:' ? 'wss:' : 'ws:';
+  }
+
+  function openTerminalPane() {
+    document.getElementById('terminal-pane').style.display = 'flex';
+    connectTerminal();
+  }
+
   // Apply Telegram theme (light/dark)
   try {
     const theme = tg?.colorScheme || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -197,10 +206,7 @@
     terminalBtn.type = 'button';
     terminalBtn.className = 'button';
     terminalBtn.textContent = t('welcomeOpenTerminal');
-    terminalBtn.addEventListener('click', () => {
-      document.getElementById('terminal-pane').style.display = 'flex';
-      connectTerminal();
-    });
+    terminalBtn.addEventListener('click', openTerminalPane);
 
     actions.appendChild(sessionsBtn);
     actions.appendChild(terminalBtn);
@@ -431,8 +437,7 @@
 
     termInstance = term;
 
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${location.host}/ws/terminal?token=${encodeURIComponent(jwt)}`;
+    const wsUrl = `${wsProto()}//${location.host}/ws/terminal?token=${encodeURIComponent(jwt)}`;
     const tws = new WebSocket(wsUrl);
     termWs = tws;
 
@@ -536,7 +541,7 @@
     termResizeObserver.observe(pane);
   }
 
-  // ---------- Rendering ----------
+  // ---------- Canvas rendering ----------
   function renderPayload(payload) {
     if (!hasCanvasContent(payload)) {
       destroyTerminal();
@@ -593,40 +598,6 @@
       const data = await res.json();
       if (!data?.token) throw new Error('no_token');
       jwt = data.token;
-
-      if (openTerminalBtn) {
-        openTerminalBtn.onclick = () => {
-          document.getElementById('terminal-pane').style.display = 'flex';
-          connectTerminal();
-        };
-      }
-
-      if (closeTerminalBtn) {
-        closeTerminalBtn.onclick = () => {
-          destroyTerminal();
-        };
-      }
-
-      if (openControlBtn) {
-        openControlBtn.onclick = () => {
-          if (openingControl) return;
-          openingControl = true;
-          setControlButtonLoading(true);
-          setStatus('connecting');
-          connText.textContent = t('statusOpeningControl');
-
-          // Open control inline in the same Mini App WebView.
-          setTimeout(() => {
-            const url = `/oc/?token=${encodeURIComponent(jwt)}`;
-            window.location.assign(url);
-          }, 80);
-        };
-      }
-
-      if (openSessionsBtn) {
-        openSessionsBtn.onclick = () => openSessions();
-      }
-
       setupSessionsUiOnce();
 
       return true;
@@ -648,8 +619,7 @@
   function connectWS() {
     if (!jwt) return;
 
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${location.host}/ws?token=${encodeURIComponent(jwt)}`;
+    const wsUrl = `${wsProto()}//${location.host}/ws?token=${encodeURIComponent(jwt)}`;
 
     setStatus('connecting');
     ws = new WebSocket(wsUrl);
@@ -877,8 +847,7 @@
   function connectSessionWs(sessionKey) {
     disconnectSessionWs();
     if (!sessionKey || !jwt) return;
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${location.host}/ws/sessions?token=${encodeURIComponent(jwt)}&sessionKey=${encodeURIComponent(sessionKey)}`;
+    const wsUrl = `${wsProto()}//${location.host}/ws/sessions?token=${encodeURIComponent(jwt)}&sessionKey=${encodeURIComponent(sessionKey)}`;
     const sws = new WebSocket(wsUrl);
     sessionWs = sws;
 
@@ -1157,6 +1126,19 @@
     updateStaticChrome();
     i18n.onLangChange(() => refreshAllUi());
     langToggleBtn?.addEventListener('click', () => i18n.toggleLang());
+    openTerminalBtn?.addEventListener('click', openTerminalPane);
+    closeTerminalBtn?.addEventListener('click', destroyTerminal);
+    openSessionsBtn?.addEventListener('click', openSessions);
+    openControlBtn?.addEventListener('click', () => {
+      if (openingControl || !jwt) return;
+      openingControl = true;
+      setControlButtonLoading(true);
+      setStatus('connecting');
+      connText.textContent = t('statusOpeningControl');
+      setTimeout(() => {
+        window.location.assign(`/oc/?token=${encodeURIComponent(jwt)}`);
+      }, 80);
+    });
 
     mainView = 'connecting';
     setStatus('connecting');
