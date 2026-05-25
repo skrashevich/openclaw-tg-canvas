@@ -88,6 +88,63 @@
     contentEl.appendChild(wrap);
   }
 
+  function showWelcome() {
+    contentEl.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'center fade-in';
+    const card = document.createElement('div');
+    card.className = 'empty-card';
+
+    const title = document.createElement('div');
+    title.className = 'welcome-title';
+    title.textContent = 'OpenClaw Canvas';
+
+    const lead = document.createElement('div');
+    lead.className = 'welcome-lead';
+    lead.textContent = 'Your agent dashboard in Telegram. Canvas content from OpenClaw appears here when pushed.';
+
+    const actions = document.createElement('div');
+    actions.className = 'welcome-actions';
+
+    const sessionsBtn = document.createElement('button');
+    sessionsBtn.type = 'button';
+    sessionsBtn.className = 'button';
+    sessionsBtn.textContent = 'Open Sessions';
+    sessionsBtn.addEventListener('click', () => openSessions());
+
+    const terminalBtn = document.createElement('button');
+    terminalBtn.type = 'button';
+    terminalBtn.className = 'button';
+    terminalBtn.textContent = 'Open Terminal';
+    terminalBtn.addEventListener('click', () => {
+      document.getElementById('terminal-pane').style.display = 'flex';
+      connectTerminal();
+    });
+
+    actions.appendChild(sessionsBtn);
+    actions.appendChild(terminalBtn);
+
+    const hint = document.createElement('div');
+    hint.className = 'welcome-hint';
+    hint.textContent = 'Tip: use Sessions to read and reply to OpenClaw chats. Canvas updates arrive live when your agent pushes content.';
+
+    card.appendChild(title);
+    card.appendChild(lead);
+    card.appendChild(actions);
+    card.appendChild(hint);
+    wrap.appendChild(card);
+    contentEl.appendChild(wrap);
+  }
+
+  function hasCanvasContent(payload) {
+    if (!payload || payload.type === 'clear') return false;
+    const content = payload.content;
+    if (content === null || content === undefined) return false;
+    if (typeof content === 'string') return content.trim().length > 0;
+    if (typeof content === 'object') return Object.keys(content).length > 0;
+    return Boolean(content);
+  }
+
   function formatRelative(ts) {
     if (!ts) return '—';
     const delta = Math.max(0, Date.now() - ts);
@@ -414,9 +471,9 @@
 
   // ---------- Rendering ----------
   function renderPayload(payload) {
-    if (!payload || payload.type === 'clear') {
+    if (!hasCanvasContent(payload)) {
       destroyTerminal();
-      showCenter('Waiting for content…');
+      showWelcome();
       return;
     }
 
@@ -496,6 +553,12 @@
         };
       }
 
+      if (openSessionsBtn) {
+        openSessionsBtn.onclick = () => openSessions();
+      }
+
+      setupSessionsUiOnce();
+
       return true;
     } catch (e) {
       return false;
@@ -543,12 +606,10 @@
 
     ws.onerror = () => {
       setStatus('reconnecting');
-      showCenter('Connection lost. Reconnecting…', true);
     };
 
     ws.onclose = () => {
       setStatus('reconnecting');
-      showCenter('Connection lost. Reconnecting…', true);
       scheduleReconnect();
     };
   }
@@ -558,6 +619,482 @@
     reconnectTimer = setTimeout(() => {
       connectWS();
     }, 3000);
+  }
+
+  // ---------- Sessions ----------
+  const openSessionsBtn = document.getElementById('openSessionsBtn');
+  const sessionsPane = document.getElementById('sessions-pane');
+  const sessionsBackBtn = document.getElementById('sessionsBackBtn');
+  const sessionsHeaderTitle = document.getElementById('sessionsHeaderTitle');
+  const sessionsRefreshBtn = document.getElementById('sessionsRefreshBtn');
+  const sessionsListView = document.getElementById('sessions-list-view');
+  const sessionsChatView = document.getElementById('sessions-chat-view');
+  const sessionsListEl = document.getElementById('sessionsList');
+  const sessionsListScroll = document.getElementById('sessionsListScroll');
+  const sessionsPullHint = document.getElementById('sessionsPullHint');
+  const sessionsMessagesEl = document.getElementById('sessionsMessages');
+  const sessionsComposer = document.getElementById('sessionsComposer');
+  const sessionsInput = document.getElementById('sessionsInput');
+  const sessionsSendBtn = document.getElementById('sessionsSendBtn');
+
+  let sessionsView = 'list';
+  let sessionsList = [];
+  let activeSessionKey = null;
+  let chatMessages = [];
+  let sessionWs = null;
+  let sessionsLoading = false;
+  let chatSending = false;
+  let pullStartY = 0;
+  let pullDistance = 0;
+  let chatStickToBottom = true;
+  let sessionsUiReady = false;
+
+  function resizeSessionsInput() {
+    if (!sessionsInput) return;
+    sessionsInput.style.height = 'auto';
+    sessionsInput.style.height = `${Math.min(sessionsInput.scrollHeight, 120)}px`;
+  }
+
+  function updateSendButtonState() {
+    if (!sessionsSendBtn) return;
+    sessionsSendBtn.disabled = chatSending;
+    sessionsSendBtn.textContent = chatSending ? '…' : 'Send';
+  }
+
+  function scrollMessagesToBottom(force = false) {
+    if (!sessionsMessagesEl) return;
+    if (!force && !chatStickToBottom) return;
+    requestAnimationFrame(() => {
+      sessionsMessagesEl.scrollTop = sessionsMessagesEl.scrollHeight;
+    });
+  }
+
+  function setupSessionsUiOnce() {
+    if (sessionsUiReady) return;
+    sessionsUiReady = true;
+
+    sessionsBackBtn?.addEventListener('click', () => {
+      if (sessionsView === 'chat') {
+        sessionsView = 'list';
+        activeSessionKey = null;
+        chatMessages = [];
+        chatSending = false;
+        disconnectSessionWs();
+        setSessionsViewMode('list');
+        renderSessionsList();
+      } else {
+        closeSessions();
+      }
+    });
+
+    sessionsRefreshBtn?.addEventListener('click', () => fetchSessionsList(true));
+
+    sessionsListScroll?.addEventListener('scroll', () => {
+      if (sessionsListScroll.scrollTop <= 0) return;
+      pullStartY = 0;
+      pullDistance = 0;
+    }, { passive: true });
+
+    sessionsListScroll?.addEventListener('touchstart', (e) => {
+      if (sessionsListScroll.scrollTop <= 0) {
+        pullStartY = e.touches[0].clientY;
+      }
+    }, { passive: true });
+
+    sessionsListScroll?.addEventListener('touchmove', (e) => {
+      if (!pullStartY || sessionsListScroll.scrollTop > 0) return;
+      pullDistance = Math.max(0, e.touches[0].clientY - pullStartY);
+      if (pullDistance > 8) {
+        sessionsPullHint.textContent = pullDistance > 50 ? 'Release to refresh' : 'Pull down to refresh';
+        sessionsPullHint.classList.toggle('is-active', pullDistance > 50);
+      }
+    }, { passive: true });
+
+    sessionsListScroll?.addEventListener('touchend', () => {
+      if (pullDistance > 50) fetchSessionsList(false);
+      pullStartY = 0;
+      pullDistance = 0;
+      sessionsPullHint.textContent = 'Pull down to refresh';
+      sessionsPullHint.classList.remove('is-active');
+    });
+
+    sessionsMessagesEl?.addEventListener('scroll', () => {
+      const el = sessionsMessagesEl;
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      chatStickToBottom = nearBottom;
+    }, { passive: true });
+
+    sessionsInput?.addEventListener('input', resizeSessionsInput);
+    sessionsInput?.addEventListener('focus', () => {
+      setTimeout(() => scrollMessagesToBottom(true), 300);
+    });
+
+    sessionsComposer?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const val = sessionsInput?.value || '';
+      if (!val.trim() || chatSending) return;
+      sessionsInput.value = '';
+      resizeSessionsInput();
+      sendChatMessage(val);
+    });
+  }
+
+  function setSessionsViewMode(mode) {
+    sessionsView = mode;
+    const isList = mode === 'list';
+    sessionsListView.hidden = !isList;
+    sessionsChatView.hidden = isList;
+    sessionsRefreshBtn.hidden = !isList;
+    sessionsBackBtn.textContent = isList ? '✕' : '← Back';
+    if (isList) {
+      sessionsHeaderTitle.textContent = 'Sessions';
+    } else {
+      const session = sessionsList.find((s) => s.key === activeSessionKey);
+      sessionsHeaderTitle.textContent = session ? sessionTitle(session) : 'Chat';
+    }
+  }
+
+  function sessionTitle(session) {
+    return session.derivedTitle || session.displayName || session.label || session.key || 'Session';
+  }
+
+  function extractMessageText(msg) {
+    if (!msg || typeof msg !== 'object') return '';
+    if (typeof msg.text === 'string' && msg.text.trim()) return msg.text;
+    if (typeof msg.content === 'string') return msg.content;
+    if (Array.isArray(msg.content)) {
+      return msg.content.map((block) => {
+        if (!block || typeof block !== 'object') return '';
+        if (block.type === 'text' && typeof block.text === 'string') return block.text;
+        return '';
+      }).filter(Boolean).join('\n');
+    }
+    return '';
+  }
+
+  function messageRole(msg) {
+    const role = typeof msg?.role === 'string' ? msg.role.toLowerCase() : '';
+    if (role === 'user' || role === 'human') return 'user';
+    if (role === 'assistant' || role === 'model') return 'assistant';
+    return 'assistant';
+  }
+
+  function formatMessageTime(ts) {
+    if (!ts || !Number.isFinite(ts)) return '';
+    const d = new Date(ts);
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function authHeaders() {
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${jwt}`,
+    };
+  }
+
+  async function apiFetch(path, opts = {}) {
+    const res = await fetch(path, {
+      ...opts,
+      headers: { ...authHeaders(), ...(opts.headers || {}) },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || `Request failed (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  function closeSessions() {
+    sessionsPane.classList.remove('is-open');
+    sessionsView = 'list';
+    activeSessionKey = null;
+    chatMessages = [];
+    chatSending = false;
+    disconnectSessionWs();
+    setSessionsViewMode('list');
+  }
+
+  function disconnectSessionWs() {
+    if (sessionWs) {
+      try { sessionWs.close(); } catch (_) {}
+      sessionWs = null;
+    }
+  }
+
+  function connectSessionWs(sessionKey) {
+    disconnectSessionWs();
+    if (!sessionKey || !jwt) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/ws/sessions?token=${encodeURIComponent(jwt)}&sessionKey=${encodeURIComponent(sessionKey)}`;
+    const sws = new WebSocket(wsUrl);
+    sessionWs = sws;
+
+    sws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'event') {
+          handleSessionEvent(msg.event, msg.payload, sessionKey);
+        }
+      } catch (_) {}
+    };
+
+    sws.onopen = () => {
+      if (sws.readyState === WebSocket.OPEN) {
+        sws.send(JSON.stringify({ type: 'subscribe', sessionKey }));
+      }
+    };
+  }
+
+  function handleSessionEvent(eventName, payload, sessionKey) {
+    if (eventName === 'session.message' && payload?.sessionKey === sessionKey && payload.message) {
+      appendChatMessage(payload.message, { replaceOptimistic: true });
+      return;
+    }
+    if (eventName === 'chat' && payload?.sessionKey === sessionKey) {
+      const state = payload.state;
+      if (state === 'delta' || state === 'final') {
+        const text = extractMessageText(payload.message) || (typeof payload.text === 'string' ? payload.text : '');
+        if (text) upsertStreamingAssistant(text, state === 'final', payload.runId);
+      }
+      if (state === 'final' || state === 'error' || state === 'aborted') {
+        chatSending = false;
+        updateSendButtonState();
+      }
+      return;
+    }
+    if (eventName === 'sessions.changed') {
+      if (sessionsView === 'list') fetchSessionsList(false);
+    }
+  }
+
+  function upsertStreamingAssistant(text, isFinal, runId) {
+    const id = runId ? `run:${runId}` : `stream:${activeSessionKey}`;
+    const existing = chatMessages.find((m) => m.id === id);
+    if (existing) {
+      existing.text = text;
+      existing.pending = !isFinal;
+    } else {
+      chatMessages.push({
+        id,
+        role: 'assistant',
+        text,
+        timestamp: Date.now(),
+        pending: !isFinal,
+      });
+    }
+    renderChatMessages();
+  }
+
+  function appendChatMessage(msg, opts = {}) {
+    const text = extractMessageText(msg);
+    if (!text.trim()) return;
+    const role = messageRole(msg);
+    const ts = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
+    if (opts.replaceOptimistic && role === 'user') {
+      const optimistic = chatMessages.findIndex((m) => m.optimistic && m.role === 'user');
+      if (optimistic >= 0) {
+        chatMessages[optimistic] = {
+          id: msg.id || `msg:${ts}`,
+          role: 'user',
+          text,
+          timestamp: ts,
+        };
+        renderChatMessages();
+        return;
+      }
+    }
+    const id = msg.id || `msg:${ts}:${Math.random().toString(36).slice(2, 7)}`;
+    if (chatMessages.some((m) => m.id === id)) return;
+    chatMessages.push({ id, role, text, timestamp: ts });
+    renderChatMessages();
+  }
+
+  async function fetchSessionsList(showSpinner = true) {
+    if (sessionsLoading) return;
+    sessionsLoading = true;
+    if (showSpinner) renderSessionsList();
+    sessionsRefreshBtn.disabled = true;
+    sessionsRefreshBtn.textContent = '…';
+    try {
+      const data = await apiFetch('/api/sessions?limit=80');
+      sessionsList = Array.isArray(data.sessions) ? data.sessions : [];
+      sessionsList.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    } catch (_) {
+      if (sessionsList.length === 0) sessionsList = [];
+    } finally {
+      sessionsLoading = false;
+      sessionsRefreshBtn.disabled = false;
+      sessionsRefreshBtn.textContent = '↻';
+      renderSessionsList();
+    }
+  }
+
+  function renderSessionsList() {
+    if (!sessionsListEl) return;
+    sessionsListEl.innerHTML = '';
+
+    if (sessionsLoading && sessionsList.length === 0) {
+      const loading = document.createElement('li');
+      loading.className = 'sessions-empty';
+      loading.textContent = 'Loading sessions…';
+      sessionsListEl.appendChild(loading);
+      return;
+    }
+
+    if (sessionsList.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'sessions-empty';
+      empty.textContent = 'No sessions found.';
+      sessionsListEl.appendChild(empty);
+      return;
+    }
+
+    for (const session of sessionsList) {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'session-item' + (session.key === activeSessionKey ? ' active' : '');
+
+      const t = document.createElement('div');
+      t.className = 'session-item-title';
+      t.textContent = sessionTitle(session);
+      btn.appendChild(t);
+
+      if (session.lastMessagePreview) {
+        const p = document.createElement('div');
+        p.className = 'session-item-preview';
+        p.textContent = session.lastMessagePreview;
+        btn.appendChild(p);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'session-item-meta';
+      meta.textContent = session.updatedAt ? formatRelative(session.updatedAt) : '';
+      btn.appendChild(meta);
+
+      btn.addEventListener('click', () => openSessionChat(session.key));
+      li.appendChild(btn);
+      sessionsListEl.appendChild(li);
+    }
+  }
+
+  async function openSessionChat(sessionKey) {
+    activeSessionKey = sessionKey;
+    chatMessages = [];
+    chatSending = false;
+    chatStickToBottom = true;
+    setSessionsViewMode('chat');
+    updateSendButtonState();
+    renderChatMessages();
+    if (sessionsInput) {
+      sessionsInput.value = '';
+      resizeSessionsInput();
+    }
+
+    try {
+      const data = await apiFetch(`/api/sessions/${encodeURIComponent(sessionKey)}/history?limit=120`);
+      const msgs = Array.isArray(data.messages) ? data.messages : [];
+      chatMessages = msgs.map((m, i) => ({
+        id: m.id || `hist:${i}`,
+        role: messageRole(m),
+        text: extractMessageText(m),
+        timestamp: typeof m.timestamp === 'number' ? m.timestamp : undefined,
+      })).filter((m) => m.text.trim());
+    } catch (_) {
+      chatMessages = [{ id: 'err', role: 'assistant', text: 'Failed to load history.', timestamp: Date.now() }];
+    }
+
+    renderChatMessages(true);
+    connectSessionWs(sessionKey);
+    setTimeout(() => sessionsInput?.focus(), 150);
+  }
+
+  async function sendChatMessage(text) {
+    if (!activeSessionKey || !text.trim() || chatSending) return;
+    const trimmed = text.trim();
+    const optimisticId = `opt:${Date.now()}`;
+    chatMessages.push({
+      id: optimisticId,
+      role: 'user',
+      text: trimmed,
+      timestamp: Date.now(),
+      optimistic: true,
+    });
+    chatSending = true;
+    chatStickToBottom = true;
+    updateSendButtonState();
+    renderChatMessages(true);
+
+    try {
+      await apiFetch(`/api/sessions/${encodeURIComponent(activeSessionKey)}/send`, {
+        method: 'POST',
+        body: JSON.stringify({ message: trimmed }),
+      });
+      const opt = chatMessages.find((m) => m.id === optimisticId);
+      if (opt) delete opt.optimistic;
+      // Agent reply arrives via WebSocket; reset sending after timeout if no response
+      setTimeout(() => {
+        if (chatSending) {
+          chatSending = false;
+          updateSendButtonState();
+        }
+      }, 120_000);
+    } catch (e) {
+      chatSending = false;
+      updateSendButtonState();
+      const opt = chatMessages.find((m) => m.id === optimisticId);
+      if (opt) {
+        opt.failed = true;
+        opt.optimistic = false;
+      }
+      renderChatMessages();
+    }
+  }
+
+  function renderChatMessages(forceScroll = false) {
+    if (!sessionsMessagesEl) return;
+    sessionsMessagesEl.innerHTML = '';
+
+    if (chatMessages.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'sessions-empty';
+      empty.textContent = 'No messages yet. Say hello!';
+      sessionsMessagesEl.appendChild(empty);
+      return;
+    }
+
+    for (const msg of chatMessages) {
+      if (!msg.text?.trim()) continue;
+      const bubble = document.createElement('div');
+      bubble.className = `chat-bubble ${msg.role}${msg.failed ? ' failed' : ''}${msg.pending ? ' pending' : ''}`;
+
+      const body = document.createElement('div');
+      body.className = 'chat-bubble-body';
+      body.textContent = msg.text;
+      bubble.appendChild(body);
+
+      if (msg.timestamp) {
+        const time = document.createElement('span');
+        time.className = 'chat-bubble-time';
+        time.textContent = formatMessageTime(msg.timestamp);
+        bubble.appendChild(time);
+      }
+
+      sessionsMessagesEl.appendChild(bubble);
+    }
+
+    scrollMessagesToBottom(forceScroll);
+  }
+
+  function openSessions() {
+    setupSessionsUiOnce();
+    sessionsPane.classList.add('is-open');
+    sessionsView = 'list';
+    setSessionsViewMode('list');
+    renderSessionsList();
+    fetchSessionsList(true);
   }
 
   // ---------- Boot ----------
@@ -574,8 +1111,8 @@
 
     // Fetch current state before WS connect
     const state = await fetchState();
-    if (state) renderPayload(state);
-    else showCenter('Waiting for content…');
+    if (state && hasCanvasContent(state)) renderPayload(state);
+    else showWelcome();
 
     connectWS();
   }

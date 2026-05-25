@@ -321,6 +321,20 @@ function proxyToOpenClaw(req, res, targetPath) {
   req.pipe(proxyReq);
 }
 
+const { createGatewayRpcPool, parseSessionsApiPath } = require("./gateway-rpc");
+const gatewayRpc = createGatewayRpcPool(OPENCLAW_PROXY_HOST, OPENCLAW_PROXY_PORT, OPENCLAW_GATEWAY_TOKEN);
+
+async function gatewayRpcRequest(method, params, opts) {
+  return gatewayRpc.request(method, params, opts);
+}
+
+function requireJwtForApi(req, urlObj) {
+  const token = getJwtFromRequest(req, urlObj);
+  const payload = verifyJwt(token);
+  if (!payload) return { ok: false, status: 401, error: "Invalid token" };
+  return { ok: true, payload, token };
+}
+
 // ---- Simple in-memory rate limiter ----
 const rateLimitBuckets = new Map();
 function rateLimit(key, limit, windowMs) {
@@ -556,6 +570,60 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // Sessions API proxy (JWT + OpenClaw gateway RPC)
+    const sessionsRoute = parseSessionsApiPath(url.pathname);
+    if (sessionsRoute) {
+      const ip = req.socket.remoteAddress || "unknown";
+      if (!rateLimit(`sessions:${ip}`, RATE_LIMIT_STATE_PER_MIN, 60_000)) {
+        return sendJson(res, 429, { error: "Rate limit" });
+      }
+      const auth = requireJwtForApi(req, url);
+      if (!auth.ok) return sendJson(res, auth.status, { error: auth.error });
+
+      try {
+        if (sessionsRoute.kind === "list" && req.method === "GET") {
+          const limit = parseInt(url.searchParams.get("limit") || "50", 10);
+          const result = await gatewayRpcRequest("sessions.list", {
+            limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 200) : 50,
+            includeLastMessage: true,
+            includeDerivedTitles: true,
+          });
+          return sendJson(res, 200, result);
+        }
+
+        if (sessionsRoute.kind === "history" && req.method === "GET") {
+          const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+          const result = await gatewayRpcRequest("chat.history", {
+            sessionKey: sessionsRoute.key,
+            limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 500) : 100,
+          });
+          return sendJson(res, 200, result);
+        }
+
+        if (sessionsRoute.kind === "send" && req.method === "POST") {
+          const body = await readBodyJson(req);
+          const message = typeof body.message === "string" ? body.message.trim() : "";
+          if (!message) return sendJson(res, 400, { error: "Missing message" });
+          const runId = crypto.randomUUID();
+          const result = await gatewayRpcRequest("chat.send", {
+            sessionKey: sessionsRoute.key,
+            message,
+            idempotencyKey: runId,
+            deliver: false,
+          }, { timeoutMs: 120_000 });
+          return sendJson(res, 200, { ok: true, runId, ...result });
+        }
+
+        return sendJson(res, 405, { error: "Method not allowed" });
+      } catch (err) {
+        if (err.code === "GATEWAY_TOKEN_MISSING") {
+          return sendJson(res, 503, { error: err.message });
+        }
+        console.error("Sessions API error:", err.message);
+        return sendJson(res, 502, { error: err.message || "Gateway unavailable" });
+      }
+    }
+
     res.writeHead(404);
     res.end("Not found");
   } catch (err) {
@@ -569,6 +637,88 @@ const wss = new WebSocketServer({ noServer: true });
 
 // ---- WebSocket server (terminal) ----
 const termWss = new WebSocketServer({ noServer: true });
+
+// ---- WebSocket server (sessions realtime) ----
+const sessionsWss = new WebSocketServer({ noServer: true });
+
+sessionsWss.on("connection", (clientWs, req, payload, sessionKey) => {
+  const gateway = gatewayRpc.createDedicatedClient();
+  if (!gateway) {
+    clientWs.send(JSON.stringify({ type: "error", error: "OPENCLAW_GATEWAY_TOKEN not configured" }));
+    clientWs.close();
+    return;
+  }
+
+  let closed = false;
+  let subscribedKey = sessionKey || null;
+  let offEvents = () => {};
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    offEvents();
+    gateway.close();
+  };
+
+  const forwardEvent = (evt) => {
+    if (clientWs.readyState !== clientWs.OPEN) return;
+    if (evt.event === "gateway.closed") {
+      clientWs.send(JSON.stringify({ type: "gateway.closed" }));
+      return;
+    }
+    if (evt.event === "chat" || evt.event === "session.message" || evt.event === "sessions.changed") {
+      clientWs.send(JSON.stringify({ type: "event", event: evt.event, payload: evt.payload }));
+    }
+  };
+
+  offEvents = gateway.onEvent(forwardEvent);
+
+  gateway.acquire().then(async () => {
+    try {
+      await gateway.request("sessions.subscribe", {});
+      if (subscribedKey) {
+        await gateway.request("sessions.messages.subscribe", { key: subscribedKey });
+      }
+      if (clientWs.readyState === clientWs.OPEN) {
+        clientWs.send(JSON.stringify({ type: "ready", sessionKey: subscribedKey }));
+      }
+    } catch (err) {
+      if (clientWs.readyState === clientWs.OPEN) {
+        clientWs.send(JSON.stringify({ type: "error", error: err.message || "subscribe failed" }));
+        clientWs.close();
+      }
+      cleanup();
+    }
+  }).catch((err) => {
+    if (clientWs.readyState === clientWs.OPEN) {
+      clientWs.send(JSON.stringify({ type: "error", error: err.message || "gateway connect failed" }));
+      clientWs.close();
+    }
+    cleanup();
+  });
+
+  clientWs.on("message", async (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "subscribe" && typeof msg.sessionKey === "string" && msg.sessionKey.trim()) {
+        const nextKey = msg.sessionKey.trim();
+        if (subscribedKey && subscribedKey !== nextKey) {
+          try {
+            await gateway.request("sessions.messages.unsubscribe", { key: subscribedKey });
+          } catch (_) {}
+        }
+        subscribedKey = nextKey;
+        await gateway.request("sessions.messages.subscribe", { key: subscribedKey });
+        if (clientWs.readyState === clientWs.OPEN) {
+          clientWs.send(JSON.stringify({ type: "subscribed", sessionKey: subscribedKey }));
+        }
+      }
+    } catch (_) {}
+  });
+
+  clientWs.on("close", cleanup);
+  clientWs.on("error", cleanup);
+});
 
 termWss.on("connection", (ws, req, payload) => {
   const shell = process.env.SHELL || "/bin/bash";
@@ -763,6 +913,27 @@ server.on("upgrade", (req, socket, head) => {
       socket.destroy();
     });
     proxyReq.end();
+    return;
+  }
+
+  if (url.pathname === "/ws/sessions") {
+    const ip = req.socket.remoteAddress || "unknown";
+    if (!rateLimit(`ws:${ip}`, RATE_LIMIT_AUTH_PER_MIN, 60_000)) {
+      socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const token = url.searchParams.get("token") || "";
+    const payload = verifyJwt(token);
+    if (!payload) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const sessionKey = url.searchParams.get("sessionKey") || "";
+    sessionsWss.handleUpgrade(req, socket, head, (ws) => {
+      sessionsWss.emit("connection", ws, req, payload, sessionKey.trim() || null);
+    });
     return;
   }
 

@@ -22,6 +22,7 @@
           <span id="connText" class="conn-text">Connecting…</span>
         </div>
         <div class="topbar-actions">
+          <button id="openSessionsBtn" class="button" style="padding:6px 10px;">Sessions</button>
           <button id="openTerminalBtn" class="button" style="padding:6px 10px;">Terminal</button>
           <button id="openControlBtn" class="button" style="padding:6px 10px;">Control</button>
         </div>
@@ -32,6 +33,30 @@
           <!-- Dynamic content rendered here -->
         </div>
       </main>
+
+      <!-- Sessions overlay — list + chat views -->
+      <div id="sessions-pane" class="sessions-pane" aria-label="Sessions">
+        <div id="sessions-root" class="sessions-root">
+          <header id="sessions-header" class="sessions-header">
+            <button id="sessionsBackBtn" type="button" class="sessions-icon-btn" aria-label="Back">✕</button>
+            <div id="sessionsHeaderTitle" class="sessions-header-title">Sessions</div>
+            <button id="sessionsRefreshBtn" type="button" class="sessions-icon-btn" aria-label="Refresh">↻</button>
+          </header>
+          <div id="sessions-list-view" class="sessions-list-view">
+            <div id="sessionsPullHint" class="sessions-pull-hint">Pull down to refresh</div>
+            <div id="sessionsListScroll" class="sessions-list-scroll">
+              <ul id="sessionsList" class="sessions-list"></ul>
+            </div>
+          </div>
+          <div id="sessions-chat-view" class="sessions-chat-view" hidden>
+            <div id="sessionsMessages" class="sessions-messages" role="log" aria-live="polite"></div>
+            <form id="sessionsComposer" class="sessions-composer" autocomplete="off">
+              <textarea id="sessionsInput" class="sessions-input" rows="1" placeholder="Message…" enterkeyhint="send"></textarea>
+              <button id="sessionsSendBtn" type="submit" class="sessions-send-btn">Send</button>
+            </form>
+          </div>
+        </div>
+      </div>
 
       <!-- Terminal overlay — sits on top of canvas, canvas state preserved underneath -->
       <div id="terminal-pane" class="terminal-pane" style="display:none" aria-label="Terminal">
