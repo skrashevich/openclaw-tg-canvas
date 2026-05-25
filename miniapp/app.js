@@ -943,7 +943,8 @@
     if (!text.trim()) return;
     const role = messageRole(msg);
     const ts = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
-    if (opts.replaceOptimistic && role === 'user') {
+    if (role === 'user') {
+      // Replace any optimistic user message (regardless of opts)
       const optimistic = chatMessages.findIndex((m) => m.optimistic && m.role === 'user');
       if (optimistic >= 0) {
         chatMessages[optimistic] = {
@@ -955,6 +956,9 @@
         renderChatMessages();
         return;
       }
+      // Dedupe by text+role for user messages (in case WS sends confirmation)
+      const dupe = chatMessages.find((m) => m.role === 'user' && m.text === text && Math.abs(m.timestamp - ts) < 5000);
+      if (dupe) return;
     }
     const id = msg.id || `msg:${ts}:${Math.random().toString(36).slice(2, 7)}`;
     if (chatMessages.some((m) => m.id === id)) return;
