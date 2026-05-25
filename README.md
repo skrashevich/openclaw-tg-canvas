@@ -2,7 +2,9 @@
 
 [![ClawHub](https://img.shields.io/badge/ClawHub-openclaw--tg--canvas-blue)](https://clawhub.ai/skills/openclaw-tg-canvas)
 
-This skill provides a Telegram Mini App with three capabilities:
+<img src="screenshot.jpg" width="300" alt="Mini App screenshot" align="right" />
+
+This skill provides a Telegram Mini App with four capabilities:
 
 1. **Canvas rendering** — push HTML, markdown, or A2UI content to a live canvas in the Mini App.
 2. **Interactive terminal** *(opt-in, JWT-gated)* — a browser-based terminal backed by a server-side PTY (bash shell). This is a significant privilege: it grants shell access to the machine running the server, scoped to the process user. Only users in `ALLOWED_USER_IDS` can open it.
