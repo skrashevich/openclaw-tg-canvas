@@ -424,6 +424,7 @@ body::after {
 .button:disabled {
   opacity: 0.65;
   cursor: wait;
+}
 .topbar-actions .button,
 .topbar-btn {
   font-size: 12px;
